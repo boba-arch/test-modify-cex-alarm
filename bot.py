@@ -340,15 +340,15 @@ def normalize_uid(href: str) -> str:
     return m.group(1) if m else href
 
 # ─── TELEGRAM SENDER ───────────────────────────────────────────────────────────
-def send_announcement(logo, cex, title, link, translate_title=False):
+def send_announcement(logo, cex, title, link):
     # Saat baseline (baris pertama kali dijalankan), pesan tidak pernah benar-benar
     # dikirim ke Telegram — jadi jangan buang waktu/kuota DeepL untuk translate
-    # judul yang hasilnya toh dibuang.
+    # judul yang hasilnya toh dibuang, dan jangan sleep(1) juga (itu cuma perlu
+    # buat rate-limit Telegram, gak relevan kalau gak ada yang dikirim).
     if not is_baseline_done():
         return
-    if translate_title:
-        title = translate_to_en(title)
     send_telegram(format_message(logo, cex, title, link))
+    time.sleep(1)
 
 def send_telegram(message):
     if not is_baseline_done():
@@ -367,11 +367,30 @@ def send_telegram(message):
     except Exception as e:
         log.error(f"❌ Gagal kirim ke Telegram: {e}")
 
+def _looks_english(text: str) -> bool:
+    """
+    Heuristik ringan: True kalau teks didominasi karakter ASCII (dianggap
+    sudah bahasa Inggris, langsung translate ke Mandarin saja).
+    False kalau ada porsi signifikan karakter non-ASCII (Korea/Hangul, Cina,
+    Jepang, dst) -> perlu ditranslate ke Inggris dulu sebelum ke Mandarin.
+    Toleransi 15% dipakai supaya token seperti nama koin/ticker (mis. "BTT",
+    "KRW") yang nyelip di judul non-Inggris tidak salah dianggap Inggris.
+    """
+    if not text:
+        return True
+    non_ascii = sum(1 for ch in text if ord(ch) > 127)
+    return (non_ascii / len(text)) < 0.15
+
 def format_message(logo, cex, title, link):
-    title_cn = translate_to_zh(title)
+    # Judul sudah Inggris -> langsung translate ke Mandarin saja.
+    # Judul bahasa lain (Korea, dll) -> translate ke Inggris dulu, baru dari
+    # hasil Inggris itu translate lagi ke Mandarin. Yang ditampilkan selalu
+    # versi Inggris + Mandarin (bukan teks bahasa asli non-Inggrisnya).
+    title_en = title if _looks_english(title) else translate_to_en(title)
+    title_cn = translate_to_zh(title_en)
     return (
         f"{logo} <b>[{cex}]</b>\n"
-        f"{title}\n"
+        f"{title_en}\n"
         f"\n"
         f"[{cex}]\n"
         f"{title_cn}\n"
@@ -494,7 +513,6 @@ def fetch_binance_api(source):
                 continue
             link = f"{source['base_link']}{code}"
             send_announcement(source["logo"], source["name"], title, link)
-            time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error API Binance: {e}")
 
@@ -517,7 +535,6 @@ def fetch_rss(source: dict):
             if not try_mark_seen(uid):
                 continue
             send_announcement(source["logo"], source["name"], title, link)
-            time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error RSS {source['name']}: {e}")
 
@@ -556,7 +573,6 @@ def fetch_gate_scrape(source):
                 continue
             link = f"https://www.gate.com{url_path}" if url_path else f"https://www.gate.com/announcements/article/{aid}"
             send_announcement(source["logo"], source["name"], title, link)
-            time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error scrape Gate.io: {e}")
 
@@ -583,7 +599,6 @@ def fetch_bitfinex_api(source):
                 continue
             link = f"{source['base_link']}{post_id}"
             send_announcement(source["logo"], source["name"], title, link)
-            time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error API Bitfinex: {e}")
 
@@ -604,7 +619,6 @@ def fetch_cryptocom_api(source):
                 continue
             link = source["base_link"]
             send_announcement(source["logo"], source["name"], title, link)
-            time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error API Crypto.com: {e}")
 
@@ -628,7 +642,6 @@ def fetch_kucoin_api(source):
             if not try_mark_seen(uid_key):
                 continue
             send_announcement(source["logo"], source["name"], title, url)
-            time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error API KuCoin: {e}")
 
@@ -663,7 +676,6 @@ def fetch_scrape(source):
                 continue
             matched += 1
             send_announcement(source["logo"], source["name"], title, href)
-            time.sleep(1)
         log.info(f"   → {matched} artikel baru cocok keyword & terkirim")
     except Exception as e:
         log.error(f"❌ Error scrape {source['name']}: {e}")
@@ -712,8 +724,7 @@ def fetch_upbit_api(source):
                 continue
 
             link = f"{source['base_link']}{nid}"
-            send_announcement(source["logo"], source["name"], title, link, translate_title=True)
-            time.sleep(1)
+            send_announcement(source["logo"], source["name"], title, link)
     except Exception as e:
         log.error(f"❌ Error API Upbit: {e}")
 
@@ -760,7 +771,6 @@ def fetch_bitget_scrape(source):
             if not try_mark_seen(uid):
                 continue
             send_announcement(source["logo"], source["name"], title, href)
-            time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error scrape Bitget: {e}")
 

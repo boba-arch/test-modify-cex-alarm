@@ -293,6 +293,27 @@ def mark_seen(uid):
     con.commit()
     con.close()
 
+def try_mark_seen(uid) -> bool:
+    """
+    Cek-dan-tandai 'sudah dilihat' dalam SATU operasi atomik (INSERT OR IGNORE),
+    bukan is_seen() lalu mark_seen() terpisah. Ini menutup celah race condition:
+    kalau dua proses/replica jalan bersamaan dan sama-sama ngecek uid yang sama
+    di waktu hampir bersamaan, hanya proses yang commit INSERT duluan yang akan
+    dapat rowcount > 0 (artinya "genuinely new") — proses lain otomatis kalah
+    karena constraint PRIMARY KEY, walau connection-nya beda.
+    Return True kalau uid ini baru pertama kali ditandai (boleh lanjut kirim),
+    False kalau sudah pernah ada (skip, jangan kirim lagi).
+    """
+    con = sqlite3.connect(DB_PATH)
+    cur = con.execute(
+        "INSERT OR IGNORE INTO seen VALUES (?,?)",
+        (uid, datetime.now(timezone.utc).isoformat()),
+    )
+    con.commit()
+    is_new = cur.rowcount > 0
+    con.close()
+    return is_new
+
 def is_baseline_done():
     con = sqlite3.connect(DB_PATH)
     row = con.execute("SELECT value FROM meta WHERE key='baseline_done'").fetchone()
@@ -384,9 +405,8 @@ def fetch_binance_api(source):
             if not code or not is_relevant(title):
                 continue
             uid = f"binance_{code}"
-            if is_seen(uid):
+            if not try_mark_seen(uid):
                 continue
-            mark_seen(uid)
             link = f"{source['base_link']}{code}"
             send_announcement(source["logo"], source["name"], title, link)
             time.sleep(1)
@@ -409,9 +429,8 @@ def fetch_rss(source: dict):
             combined_text = f"{title} {summary}"
             if not uid or not is_relevant(combined_text):
                 continue
-            if is_seen(uid):
+            if not try_mark_seen(uid):
                 continue
-            mark_seen(uid)
             send_announcement(source["logo"], source["name"], title, link)
             time.sleep(1)
     except Exception as e:
@@ -448,9 +467,8 @@ def fetch_gate_scrape(source):
             if not aid or len(title) < 10 or not is_relevant(title):
                 continue
             uid = f"gate_{aid}"
-            if is_seen(uid):
+            if not try_mark_seen(uid):
                 continue
-            mark_seen(uid)
             link = f"https://www.gate.com{url_path}" if url_path else f"https://www.gate.com/announcements/article/{aid}"
             send_announcement(source["logo"], source["name"], title, link)
             time.sleep(1)
@@ -476,9 +494,8 @@ def fetch_bitfinex_api(source):
             if not is_relevant(combined_text):
                 continue
             uid = f"bitfinex_{post_id}"
-            if is_seen(uid):
+            if not try_mark_seen(uid):
                 continue
-            mark_seen(uid)
             link = f"{source['base_link']}{post_id}"
             send_announcement(source["logo"], source["name"], title, link)
             time.sleep(1)
@@ -498,9 +515,8 @@ def fetch_cryptocom_api(source):
             if not aid or not is_relevant(title):
                 continue
             uid = f"cryptocom_{aid}"
-            if is_seen(uid):
+            if not try_mark_seen(uid):
                 continue
-            mark_seen(uid)
             link = source["base_link"]
             send_announcement(source["logo"], source["name"], title, link)
             time.sleep(1)
@@ -524,9 +540,8 @@ def fetch_kucoin_api(source):
             if not uid or not is_relevant(combined_text):
                 continue
             uid_key = f"kucoin_{uid}"
-            if is_seen(uid_key):
+            if not try_mark_seen(uid_key):
                 continue
-            mark_seen(uid_key)
             send_announcement(source["logo"], source["name"], title, url)
             time.sleep(1)
     except Exception as e:
@@ -556,11 +571,12 @@ def fetch_scrape(source):
             elif not href.startswith("http"):
                 continue
             uid = normalize_uid(href)
-            if uid in seen_uids or is_seen(uid):
+            if uid in seen_uids:
                 continue
             seen_uids.add(uid)
+            if not try_mark_seen(uid):
+                continue
             matched += 1
-            mark_seen(uid)
             send_announcement(source["logo"], source["name"], title, href)
             time.sleep(1)
         log.info(f"   → {matched} artikel baru cocok keyword & terkirim")
@@ -607,9 +623,8 @@ def fetch_upbit_api(source):
                 continue
 
             uid = f"upbit_{nid}"
-            if is_seen(uid):
+            if not try_mark_seen(uid):
                 continue
-            mark_seen(uid)
 
             link = f"{source['base_link']}{nid}"
             send_announcement(source["logo"], source["name"], title, link, translate_title=True)
@@ -653,11 +668,12 @@ def fetch_bitget_scrape(source):
                 href = source["base_link"] + href
 
             uid = f"bitget_{href.rstrip('/').split('/')[-1]}"
-            if uid in seen_uids or is_seen(uid):
+            if uid in seen_uids:
                 continue
 
             seen_uids.add(uid)
-            mark_seen(uid)
+            if not try_mark_seen(uid):
+                continue
             send_announcement(source["logo"], source["name"], title, href)
             time.sleep(1)
     except Exception as e:

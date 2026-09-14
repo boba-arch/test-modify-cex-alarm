@@ -123,7 +123,7 @@ def _deepl_translate(text: str, target_lang: str) -> str:
             DEEPL_API_URL,
             headers={"Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}"},
             data={"text": text, "target_lang": target_lang},
-            timeout=15,
+            timeout=(5, 15),  # (connect timeout, read timeout) — lebih defensif dari hang
         )
         r.raise_for_status()
         translations = r.json().get("translations", [])
@@ -314,6 +314,16 @@ def normalize_uid(href: str) -> str:
     return m.group(1) if m else href
 
 # ─── TELEGRAM SENDER ───────────────────────────────────────────────────────────
+def send_announcement(logo, cex, title, link, translate_title=False):
+    # Saat baseline (baris pertama kali dijalankan), pesan tidak pernah benar-benar
+    # dikirim ke Telegram — jadi jangan buang waktu/kuota DeepL untuk translate
+    # judul yang hasilnya toh dibuang.
+    if not is_baseline_done():
+        return
+    if translate_title:
+        title = translate_to_en(title)
+    send_telegram(format_message(logo, cex, title, link))
+
 def send_telegram(message):
     if not is_baseline_done():
         return
@@ -378,7 +388,7 @@ def fetch_binance_api(source):
                 continue
             mark_seen(uid)
             link = f"{source['base_link']}{code}"
-            send_telegram(format_message(source["logo"], source["name"], title, link))
+            send_announcement(source["logo"], source["name"], title, link)
             time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error API Binance: {e}")
@@ -402,7 +412,7 @@ def fetch_rss(source: dict):
             if is_seen(uid):
                 continue
             mark_seen(uid)
-            send_telegram(format_message(source["logo"], source["name"], title, link))
+            send_announcement(source["logo"], source["name"], title, link)
             time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error RSS {source['name']}: {e}")
@@ -442,7 +452,7 @@ def fetch_gate_scrape(source):
                 continue
             mark_seen(uid)
             link = f"https://www.gate.com{url_path}" if url_path else f"https://www.gate.com/announcements/article/{aid}"
-            send_telegram(format_message(source["logo"], source["name"], title, link))
+            send_announcement(source["logo"], source["name"], title, link)
             time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error scrape Gate.io: {e}")
@@ -470,7 +480,7 @@ def fetch_bitfinex_api(source):
                 continue
             mark_seen(uid)
             link = f"{source['base_link']}{post_id}"
-            send_telegram(format_message(source["logo"], source["name"], title, link))
+            send_announcement(source["logo"], source["name"], title, link)
             time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error API Bitfinex: {e}")
@@ -492,7 +502,7 @@ def fetch_cryptocom_api(source):
                 continue
             mark_seen(uid)
             link = source["base_link"]
-            send_telegram(format_message(source["logo"], source["name"], title, link))
+            send_announcement(source["logo"], source["name"], title, link)
             time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error API Crypto.com: {e}")
@@ -517,7 +527,7 @@ def fetch_kucoin_api(source):
             if is_seen(uid_key):
                 continue
             mark_seen(uid_key)
-            send_telegram(format_message(source["logo"], source["name"], title, url))
+            send_announcement(source["logo"], source["name"], title, url)
             time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error API KuCoin: {e}")
@@ -551,7 +561,7 @@ def fetch_scrape(source):
             seen_uids.add(uid)
             matched += 1
             mark_seen(uid)
-            send_telegram(format_message(source["logo"], source["name"], title, href))
+            send_announcement(source["logo"], source["name"], title, href)
             time.sleep(1)
         log.info(f"   → {matched} artikel baru cocok keyword & terkirim")
     except Exception as e:
@@ -601,9 +611,8 @@ def fetch_upbit_api(source):
                 continue
             mark_seen(uid)
 
-            title_en = translate_to_en(title)
             link = f"{source['base_link']}{nid}"
-            send_telegram(format_message(source["logo"], source["name"], title_en, link))
+            send_announcement(source["logo"], source["name"], title, link, translate_title=True)
             time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error API Upbit: {e}")
@@ -649,7 +658,7 @@ def fetch_bitget_scrape(source):
 
             seen_uids.add(uid)
             mark_seen(uid)
-            send_telegram(format_message(source["logo"], source["name"], title, href))
+            send_announcement(source["logo"], source["name"], title, href)
             time.sleep(1)
     except Exception as e:
         log.error(f"❌ Error scrape Bitget: {e}")

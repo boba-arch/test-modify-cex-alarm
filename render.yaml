@@ -9,3 +9,5 @@ services:
         sync: false        # isi manual di dashboard Render
       - key: CHANNEL_ID
         sync: false        # isi manual di dashboard Render
+      - key: DEEPL_API_KEY
+        sync: false        # isi manual di dashboard Render

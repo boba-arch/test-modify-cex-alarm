@@ -9,19 +9,30 @@ import feedparser
 from datetime import datetime, timezone
 from apscheduler.schedulers.blocking import BlockingScheduler
 from bs4 import BeautifulSoup
-from deep_translator import GoogleTranslator
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-BOT_TOKEN   = os.environ.get("BOT_TOKEN")
-CHANNEL_ID  = os.environ.get("CHANNEL_ID")
-CHECK_EVERY = 2
-DB_PATH     = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", ".") + "/seen.db"
+BOT_TOKEN     = os.environ.get("BOT_TOKEN")
+CHANNEL_ID    = os.environ.get("CHANNEL_ID")
+DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY")
+CHECK_EVERY   = 2
+DB_PATH       = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", ".") + "/seen.db"
 
 if not BOT_TOKEN or not CHANNEL_ID:
     raise ValueError("BOT_TOKEN dan CHANNEL_ID harus diisi di Railway Variables!")
 
+# DeepL free-tier keys end with ":fx" and must hit the api-free host; paid keys
+# use api.deepl.com. This picks the right host automatically from the key.
+DEEPL_API_URL = (
+    "https://api-free.deepl.com/v2/translate"
+    if DEEPL_API_KEY and DEEPL_API_KEY.endswith(":fx")
+    else "https://api.deepl.com/v2/translate"
+)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+
+if not DEEPL_API_KEY:
+    log.warning("⚠️ DEEPL_API_KEY tidak diisi — translasi akan dilewati (pakai teks asli).")
 
 GATE_BUILD_ID = "Fn6h1ESDRJ7ImYZYPgoXC"
 
@@ -104,79 +115,35 @@ def _is_bad_translation(result: str, original: str) -> bool:
     low = result.lower()
     return any(marker in low for marker in BAD_TRANSLATION_MARKERS)
 
-def translate_to_chinese(text: str) -> str:
-    """
-    Translates to Simplified Chinese. Tries DeepL first (reliable, your own
-    quota, needs DEEPL_API_KEY) then falls back to two free keyless
-    endpoints if DeepL isn't configured or has an outage.
-    """
-    # Primary: DeepL, if a key is configured. Reliable, authenticated,
-    # 500,000 free characters/month — no shared-IP throttling like the
-    # free public endpoints below.
-    if DEEPL_API_KEY:
-        try:
-            resp = requests.post(
-                "https://api-free.deepl.com/v2/translate",
-                headers={"Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}"},
-                data={"text": text, "target_lang": "ZH"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            translated = resp.json()["translations"][0]["text"]
-            if translated.strip():
-                return translated
-        except Exception as e:
-            print(f"Primary translation (DeepL) failed: {e}", file=sys.stderr)
-    else:
-        print("DEEPL_API_KEY not set — using free fallback translators "
-              "(less reliable). See SETUP_GUIDE.md to add DeepL.", file=sys.stderr)
-
-    # Fallback 1: Google Translate's public endpoint, with a browser-like
-    # User-Agent — some hosts get silently rejected without one. Prone to
-    # rate limiting (429) from shared cloud-host IPs.
+def _deepl_translate(text: str, target_lang: str) -> str:
+    if not text or not DEEPL_API_KEY:
+        return text
     try:
-        resp = requests.get(
-            "https://translate.googleapis.com/translate_a/single",
-            params={
-                "client": "gtx",
-                "sl": "en",
-                "tl": "zh-CN",
-                "dt": "t",
-                "q": text,
-            },
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) "
-                              "Chrome/120.0.0.0 Safari/537.36"
-            },
+        r = requests.post(
+            DEEPL_API_URL,
+            headers={"Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}"},
+            data={"text": text, "target_lang": target_lang},
             timeout=15,
         )
-        resp.raise_for_status()
-        segments = resp.json()[0]
-        translated = "".join(seg[0] for seg in segments if seg[0])
-        if translated.strip():
-            return translated
+        r.raise_for_status()
+        translations = r.json().get("translations", [])
+        if not translations:
+            log.warning(f"⚠️ Respons DeepL tanpa hasil translasi, pakai teks asli.")
+            return text
+        result = translations[0].get("text", text)
+        if _is_bad_translation(result, text):
+            log.warning(f"⚠️ Gagal translate, pakai judul asli. Raw: {str(result)[:80]}")
+            return text
+        return result
     except Exception as e:
-        print(f"Fallback translation (Google) failed: {e}", file=sys.stderr)
+        log.error(f"⚠️ Gagal translate ke {target_lang} (DeepL): {e}")
+        return text
 
-    # Fallback 2: MyMemory's free translation API (no key required, rate
-    # limited but fine for occasional fallback use).
-    try:
-        resp = requests.get(
-            "https://api.mymemory.translated.net/get",
-            params={"q": text, "langpair": "en|zh-CN"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        translated = data.get("responseData", {}).get("translatedText", "")
-        if translated.strip():
-            return translated
-    except Exception as e:
-        print(f"Fallback translation (MyMemory) failed: {e}", file=sys.stderr)
+def translate_to_en(text: str) -> str:
+    return _deepl_translate(text, "EN-US")
 
-    return "(translation unavailable — see logs for the underlying error)"
-
+def translate_to_zh(text: str) -> str:
+    return _deepl_translate(text, "ZH")
 
 
 # ─── CEX SOURCES ───────────────────────────────────────────────────────────────

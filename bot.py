@@ -4,6 +4,7 @@ import os
 import time
 import sqlite3
 import logging
+import threading
 import requests
 import feedparser
 from datetime import datetime, timezone
@@ -11,11 +12,12 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from bs4 import BeautifulSoup
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-BOT_TOKEN     = os.environ.get("BOT_TOKEN")
-CHANNEL_ID    = os.environ.get("CHANNEL_ID")
-DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY")
-CHECK_EVERY   = 2
-DB_PATH       = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", ".") + "/seen.db"
+BOT_TOKEN      = os.environ.get("BOT_TOKEN")
+CHANNEL_ID     = os.environ.get("CHANNEL_ID")
+DEEPL_API_KEY  = os.environ.get("DEEPL_API_KEY")
+OWNER_CHAT_ID  = os.environ.get("OWNER_CHAT_ID")  # chat ID pribadi kamu — otorisasi command /test
+CHECK_EVERY    = 2
+DB_PATH        = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", ".") + "/seen.db"
 
 if not BOT_TOKEN or not CHANNEL_ID:
     raise ValueError("BOT_TOKEN dan CHANNEL_ID harus diisi di Railway Variables!")
@@ -33,6 +35,9 @@ log = logging.getLogger(__name__)
 
 if not DEEPL_API_KEY:
     log.warning("⚠️ DEEPL_API_KEY tidak diisi — translasi akan dilewati (pakai teks asli).")
+
+if not OWNER_CHAT_ID:
+    log.warning("⚠️ OWNER_CHAT_ID tidak diisi — command /test akan menerima perintah dari SIAPA SAJA yang chat bot ini. Disarankan diisi.")
 
 GATE_BUILD_ID = "Fn6h1ESDRJ7ImYZYPgoXC"
 
@@ -372,6 +377,86 @@ def format_message(logo, cex, title, link):
         f"{title_cn}\n"
         f"🔗 <a href='{link}'>Announcement</a>"
     )
+
+# ─── COMMAND /test (TOMBOL TES DI TELEGRAM) ────────────────────────────────────
+def _telegram_api(method, payload=None, timeout=20):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    r = requests.post(url, json=payload or {}, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+def _send_with_test_button(chat_id, text):
+    """Balas ke chat_id dengan pesan + tombol inline '🔁 Test Lagi'."""
+    try:
+        _telegram_api("sendMessage", {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+            "reply_markup": {
+                "inline_keyboard": [[{"text": "🔁 Test Lagi", "callback_data": "run_test"}]]
+            },
+        })
+    except Exception as e:
+        log.error(f"❌ Gagal balas command /test: {e}")
+
+def run_dummy_test(chat_id):
+    """Bikin dummy announcement, translate via DeepL, kirim ke CHANNEL_ID
+    (label jelas TEST), lalu balas konfirmasi + tombol 'Test Lagi' ke chat_id
+    yang minta. Sengaja tidak lewat send_telegram()/is_baseline_done() supaya
+    tes bisa jalan kapan saja, gak perlu nunggu baseline selesai."""
+    dummy_title = "Binance Will Delist BTTOLD, MBL and ANT on 2026-09-20 (DUMMY TEST)"
+    dummy_link  = "https://example.com/test-announcement"
+    try:
+        message = format_message("🧪", "TEST", dummy_title, dummy_link)
+        _telegram_api("sendMessage", {
+            "chat_id": CHANNEL_ID,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        })
+        _send_with_test_button(
+            chat_id,
+            "✅ Dummy alert terkirim ke channel & translate DeepL jalan normal."
+        )
+        log.info("✅ /test: dummy alert terkirim & translate sukses")
+    except Exception as e:
+        _send_with_test_button(chat_id, f"❌ Test gagal: {e}")
+        log.error(f"❌ /test gagal: {e}")
+
+def poll_telegram_commands():
+    """Long-polling sederhana buat nangkep command '/test' dan tombol
+    '🔁 Test Lagi' dari chat pribadi kamu ke bot. Jalan di thread terpisah,
+    gak ganggu scheduler check_all() yang jalan di thread utama."""
+    log.info("🕹️  Listener command /test aktif...")
+    offset = None
+    while True:
+        try:
+            resp = _telegram_api("getUpdates", {"timeout": 30, "offset": offset})
+            for update in resp.get("result", []):
+                offset = update["update_id"] + 1
+
+                msg = update.get("message")
+                if msg and msg.get("text") == "/test":
+                    chat_id = str(msg["chat"]["id"])
+                    if OWNER_CHAT_ID and chat_id != str(OWNER_CHAT_ID):
+                        log.warning(f"⚠️ Command /test diabaikan dari chat_id tidak dikenal: {chat_id}")
+                        continue
+                    run_dummy_test(chat_id)
+
+                cb = update.get("callback_query")
+                if cb and cb.get("data") == "run_test":
+                    chat_id = str(cb["message"]["chat"]["id"])
+                    if OWNER_CHAT_ID and chat_id != str(OWNER_CHAT_ID):
+                        continue
+                    _telegram_api("answerCallbackQuery", {
+                        "callback_query_id": cb["id"],
+                        "text": "Menjalankan test...",
+                    })
+                    run_dummy_test(chat_id)
+        except Exception as e:
+            log.error(f"⚠️ Error polling command /test: {e}")
+            time.sleep(5)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -718,6 +803,9 @@ if __name__ == "__main__":
         log.info("ℹ️ Baseline sudah pernah dijalankan sebelumnya, langsung mode normal.")
 
     send_telegram("🤖 <b>Crypto CEX Alarm Bot aktif!</b> 🚀")
+
+    # Listener command /test jalan di background thread, terpisah dari scheduler
+    threading.Thread(target=poll_telegram_commands, daemon=True).start()
 
     scheduler = BlockingScheduler(timezone="UTC")
     scheduler.add_job(check_all, "interval", minutes=CHECK_EVERY, max_instances=1, coalesce=True)

@@ -1,0 +1,11 @@
+services:
+  - type: worker
+    name: crypto-alert-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false        # isi manual di dashboard Render
+      - key: CHANNEL_ID
+        sync: false        # isi manual di dashboard Render

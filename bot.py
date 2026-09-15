@@ -39,7 +39,11 @@ if not DEEPL_API_KEY:
 if not OWNER_CHAT_ID:
     log.warning("⚠️ OWNER_CHAT_ID tidak diisi — command /test akan menerima perintah dari SIAPA SAJA yang chat bot ini. Disarankan diisi.")
 
-GATE_BUILD_ID = "Fn6h1ESDRJ7ImYZYPgoXC"
+# Gate.io's Next.js site embeds a "buildId" in every page that changes on
+# each of their deployments. We no longer hardcode it — get_gate_build_id()
+# below scrapes it live and caches it here, refreshing automatically if it
+# ever goes stale.
+_gate_build_id_cache = {"id": None}
 
 HEADERS_GATE = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
@@ -50,6 +54,45 @@ HEADERS_GATE = {
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
 }
+
+
+def get_gate_build_id(force_refresh: bool = False):
+    """Every Next.js page ships a <script id="__NEXT_DATA__" type="application/json">
+    tag containing {"buildId": "...", ...} — this is baked into the framework
+    itself and isn't a Gate-specific quirk, so it's a stable place to read the
+    ID from. We fetch the plain announcements page (not the JSON API), pull
+    buildId out of that script tag, and cache it in memory so we're not
+    re-scraping the HTML page on every single check_all() run."""
+    if _gate_build_id_cache["id"] and not force_refresh:
+        return _gate_build_id_cache["id"]
+    try:
+        r = requests.get(
+            "https://www.gate.com/announcements/lastest",
+            headers={**HEADERS_GATE, "Accept": "text/html"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        tag = soup.find("script", id="__NEXT_DATA__")
+        build_id = None
+        if tag and tag.string:
+            try:
+                build_id = json.loads(tag.string).get("buildId")
+            except json.JSONDecodeError:
+                build_id = None
+        if not build_id:
+            # fallback in case Gate ever changes how/where the tag is rendered
+            m = re.search(r'"buildId"\s*:\s*"([^"]+)"', r.text)
+            build_id = m.group(1) if m else None
+        if build_id:
+            _gate_build_id_cache["id"] = build_id
+            log.info(f"   → Gate.io build ID terdeteksi: {build_id}")
+        else:
+            log.error("❌ Gate.io: tidak menemukan buildId di halaman (struktur mungkin berubah)")
+        return build_id
+    except Exception as e:
+        log.error(f"❌ Gagal ambil Gate.io build ID: {e}")
+        return None
 
 # ─── KEYWORDS ──────────────────────────────────────────────────────────────────
 KEYWORDS = [
@@ -542,13 +585,24 @@ def fetch_rss(source: dict):
 def fetch_gate_scrape(source):
     log.info(f"🕷️  Scrape: Gate.io")
     try:
-        url = f"https://www.gate.com/announcements/_next/data/{GATE_BUILD_ID}/en/announcements/lastest.json?category=lastest"
+        build_id = get_gate_build_id()
+        if not build_id:
+            log.error("❌ Gate.io: tidak bisa lanjut tanpa build ID")
+            return
+
+        url = f"https://www.gate.com/announcements/_next/data/{build_id}/en/announcements/lastest.json?category=lastest"
         r = requests.get(url, headers=HEADERS_GATE, timeout=15)
         log.info(f"   → status: {r.status_code} | len: {len(r.text)}")
 
         if r.status_code == 404:
-            log.error("❌ Gate.io: 404 — GATE_BUILD_ID sudah basi, perlu diupdate manual")
-            return
+            log.warning("⚠️ Gate.io: build ID basi, mengambil ulang otomatis...")
+            build_id = get_gate_build_id(force_refresh=True)
+            if not build_id:
+                log.error("❌ Gate.io: gagal refresh build ID")
+                return
+            url = f"https://www.gate.com/announcements/_next/data/{build_id}/en/announcements/lastest.json?category=lastest"
+            r = requests.get(url, headers=HEADERS_GATE, timeout=15)
+            log.info(f"   → status (setelah refresh): {r.status_code} | len: {len(r.text)}")
 
         if r.status_code != 200:
             log.error(f"❌ Gate.io: status code {r.status_code}")
